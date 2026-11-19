@@ -1,0 +1,264 @@
+# --- Séance 3 : bloc commun aux services Airflow ----------------------------------------------
+# Une seule définition, réutilisée par <<: *airflow-commun dans airflow-init, airflow-scheduler
+# et airflow-webserver. L'ancre &airflow-env porte le bloc environment.
+x-airflow-commun: &airflow-commun
+  build:
+    context: ./airflow
+  # Une seule image pour les trois services : sans cette clé, Compose construirait (et nommerait)
+  # trois images identiques.
+  image: s1-vitals-airflow:2.10.5
+  environment: &airflow-env
+    # Exécuteur : LocalExecutor (sous-processus du scheduler), sans service supplémentaire.
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Base de métadonnées : une seconde base, « airflow », dans le serveur PostgreSQL de la séance 2.
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://hs_user:hs_password@postgres:5432/airflow
+    # Allègement mémoire : pas de DAG d'exemple, un seul processus de parsing.
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__SCHEDULER__PARSING_PROCESSES: "1"
+    AIRFLOW__CORE__PARALLELISM: "4"
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "30"
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "60"
+    AIRFLOW__WEBSERVER__WORKERS: "1"
+    AIRFLOW__WEBSERVER__SECRET_KEY: "s3-healthstream-tp"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__FERNET_KEY: ""
+    # Adaptation poste Windows : le run_id d'Airflow contient « : » et « + »
+    # (manual__2026-10-27T09:00:00+00:00), caractères interdits dans un nom de fichier NTFS, et
+    # logs/ est un bind mount vers le disque Windows. Le gabarit par défaut de Airflow est
+    # conservé tel quel, sauf que ces deux caractères deviennent « _ » dans le nom du dossier.
+    AIRFLOW__LOGGING__LOG_FILENAME_TEMPLATE: "dag_id={{ ti.dag_id }}/run_id={{ ti.run_id | replace(':', '_') | replace('+', '_') }}/task_id={{ ti.task_id }}/attempt={{ try_number }}.log"
+    # Connexion et variables Airflow déclarées par l'environnement : versionnées avec le Compose,
+    # jamais cliquées dans l'interface.
+    AIRFLOW_CONN_HEALTHSTREAM_PG: postgresql://hs_user:hs_password@postgres:5432/healthstream
+    AIRFLOW_VAR_KAFKA_BOOTSTRAP: kafka:9092
+    AIRFLOW_VAR_VITALS_TOPIC: mimic-vitals
+    AIRFLOW_VAR_VITALS_GROUP: vitals-persister
+    AIRFLOW_VAR_FENETRE_DUREE_S: "60"
+    AIRFLOW_VAR_LAG_MAX: "200"
+  # UID lu dans .env (50000 par défaut ; sous Linux : echo "AIRFLOW_UID=$(id -u)" > .env).
+  # Le GID 0 est requis par l'image officielle.
+  user: "${AIRFLOW_UID:-50000}:0"
+  networks:
+    - vitals-net
+  volumes:
+    # Le scheduler ne lit les DAG que dans le dossier monté sur /opt/airflow/dags.
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./data:/opt/airflow/data
+    # Airflow lance le producteur, il ne le modifie pas : lecture seule.
+    - ./producer:/opt/airflow/producer:ro
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.8.0
+    container_name: vitals-kafka
+    environment:
+      # Identité KRaft : un seul nœud, broker + controller
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qg
+      # Listeners : sur quoi le broker écoute
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,PLAINTEXT_HOST://0.0.0.0:29092
+      # Listeners annoncés : ce que les clients utilisent pour rappeler le broker
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # Réplication : un seul broker, donc 1 partout
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Démarrage et garde-fous
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # Données
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    networks:
+      - vitals-net
+    ports:
+      - "29092:29092"
+
+  # --- Séance 2 : la mémoire durable du système ---------------------------------------------
+  postgres:
+    # PostgreSQL 18.6 figé par digest : seul le tag latest est gratuit chez Chainguard,
+    # et un tag latest seul n'est pas une version.
+    image: cgr.dev/chainguard/postgres:latest@sha256:0926ac7262a2c1963179eb939cd5d610e1be3ecca90b4b5cad8db8df16fab87e
+    container_name: vitals-postgres
+    environment:
+      # Lues par l'entrypoint de l'image au premier démarrage seulement
+      POSTGRES_DB: healthstream
+      POSTGRES_USER: hs_user
+      POSTGRES_PASSWORD: hs_password
+    ports:
+      # Port hôte volontairement décalé : évite le conflit avec un PostgreSQL local sur 5432
+      - "55432:5432"
+    volumes:
+      # Données : volume nommé
+      - pg-data:/var/lib/postgresql/data
+      # Schéma : configuration, donc bind mount en lecture seule. L'image Chainguard ignore
+      # /docker-entrypoint-initdb.d : son répertoire d'initialisation est /var/lib/postgres/initdb/
+      - ./sql/init.sql:/var/lib/postgres/initdb/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hs_user -d healthstream"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - vitals-net
+
+  producer:
+    build:
+      context: ./producer
+    container_name: vitals-producer
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      VITALS_TOPIC: mimic-vitals
+      # Réglable depuis le terminal (partie 5.2) : variable du terminal si elle existe, 1.0 sinon
+      INTERVAL_S: "${INTERVAL_S:-1.0}"
+    volumes:
+      - vitals-logs:/app/logs
+    networks:
+      - vitals-net
+    depends_on:
+      kafka:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  consumer:
+    build:
+      context: ./consumer
+    # PAS de container_name : Compose refuserait de dupliquer un nom fixe, et
+    # « docker compose up -d --scale consumer=2 » (partie 5.2) échouerait.
+    environment:
+      # Adresses internes au réseau Docker : noms de service et ports internes, jamais localhost
+      KAFKA_BOOTSTRAP: kafka:9092
+      VITALS_TOPIC: mimic-vitals
+      CONSUMER_GROUP: vitals-persister
+      AUTO_OFFSET_RESET: earliest
+      # Surchargeable depuis le terminal (partie 5.2) : 200 par défaut
+      BATCH_SIZE: "${BATCH_SIZE:-200}"
+      BATCH_TIMEOUT_S: "5.0"
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DB: healthstream
+      PG_USER: hs_user
+      PG_PASSWORD: hs_password
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - vitals-net
+
+  # --- Séance 3 : l'orchestration -----------------------------------------------------------
+  # Étape 1 (usage unique) : créer la base « airflow » à côté de « healthstream », dans le
+  # PostgreSQL existant. Même image que postgres, dont on n'utilise que le client psql.
+  # CREATE DATABASE n'accepte pas IF NOT EXISTS : on teste l'existence dans pg_database avant de
+  # créer, ce qui rend le service rejouable sans erreur.
+  # ENCODING 'UTF8' TEMPLATE template0 : la base de métadonnées stocke des textes accentués
+  # (descriptions de DAG, messages d'erreur) ; on ne dépend donc pas de l'encodage par défaut du
+  # serveur, qui est SQL_ASCII quand initdb s'exécute sans locale.
+  airflow-db-init:
+    image: cgr.dev/chainguard/postgres:latest@sha256:0926ac7262a2c1963179eb939cd5d610e1be3ecca90b4b5cad8db8df16fab87e
+    container_name: vitals-airflow-db-init
+    environment:
+      PGPASSWORD: hs_password
+    entrypoint: ["sh", "-c"]
+    command:             # liste à UN élément : le tiret est indispensable
+      - >
+        psql -h postgres -U hs_user -d healthstream -tAc
+        "SELECT 1 FROM pg_database WHERE datname='airflow'" | grep -q 1
+        || psql -h postgres -U hs_user -d healthstream -c "CREATE DATABASE airflow OWNER hs_user ENCODING 'UTF8' TEMPLATE template0"
+    networks:
+      - vitals-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # Étape 2 (usage unique) : migration du schéma de métadonnées + compte administrateur.
+  # Pas de surcharge de entrypoint : le point d'entrée officiel déclare l'UID de .env dans
+  # /etc/passwd, sans quoi Airflow refuse de démarrer (uid not found).
+  airflow-init:
+    <<: *airflow-commun
+    container_name: vitals-airflow-init
+    command:
+      - bash
+      - -c
+      - >
+        set -e;
+        airflow db migrate;
+        airflow users create --username admin --password admin --firstname Ops --lastname ICU
+        --role Admin --email admin@healthstream.local || true
+    depends_on:
+      airflow-db-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  airflow-scheduler:
+    <<: *airflow-commun
+    container_name: vitals-airflow-sched
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # LocalExecutor : les tâches sont des sous-processus du scheduler (dont produire_fenetre,
+          # qui lance producer.py), donc leur mémoire compte dans ce plafond.
+          memory: 2g
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 45s
+
+  airflow-webserver:
+    <<: *airflow-commun
+    container_name: vitals-airflow-web
+    command: webserver
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  vitals-logs:
+  kafka-data:
+  pg-data:
+
+networks:
+  vitals-net:
+    driver: bridge

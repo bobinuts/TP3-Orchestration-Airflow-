@@ -1,0 +1,11 @@
+{
+  "dag_id": "healthstream_ingestion",
+  "window_start": "2026-11-19 10:00:00+00:00",
+  "window_end": "2026-11-19 11:00:00+00:00",
+  "rows_ingested": 2365,
+  "patients": 12,
+  "null_values": 0,
+  "unknown_types": 0,
+  "lag_before": 0,
+  "lag_after": 11
+}

@@ -1,0 +1,11 @@
+{
+  "gravite": "CRITIQUE",
+  "dag_id": "healthstream_ingestion",
+  "task_id": "verifier_integrite",
+  "run_id": "backfill__2026-11-19T09:00:00+01:00",
+  "fenetre": "2026-11-19 08:00:00+00:00",
+  "tentative": 3,
+  "erreur": "aucune ligne ingérée dans la fenêtre [2026-11-19 08:00:00+00:00 ; 2026-11-19 09:00:00+00:00[",
+  "journal": "/opt/airflow/logs/dag_id=healthstream_ingestion/run_id=backfill__2026-11-19T09_00_00_01_00/task_id=verifier_integrite/",
+  "horodatage": "2026-11-19T12:41:53.307680+01:00"
+}

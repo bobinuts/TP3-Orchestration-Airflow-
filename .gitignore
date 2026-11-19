@@ -1,0 +1,22 @@
+# Environnement Python local
+.venv/
+__pycache__/
+*.pyc
+
+# Variables d'environnement et secrets éventuels (le .env de la séance 3 ne porte que
+# AIRFLOW_UID : il est versionné, il fait partie du livrable)
+.env.*
+
+# Journaux de tâches Airflow : plusieurs dizaines de Mo, hors rendu
+logs/
+
+# Hors rendu : sauvegarde du schéma, journaux, archives
+schema_dump.sql
+*.log
+*.zip
+
+# Éditeurs et système
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
